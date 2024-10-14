@@ -16,36 +16,39 @@ type LatLon struct {
 }
 
 func main() {
-	var latlonData []LatLon
-	UnmarshalJSON(GetLatLon(), &latlonData)
+	client := &http.Client{}
+	//var location LatLon
+	var htmlData []byte
+	GetLatLon(client, &htmlData)
+	fmt.Printf("This is htmlData within the main function: %s\n", string(htmlData))
+	/*if latlonErr := json.Unmarshal(htmlData, &location); latlonErr != nil {
+		log.Fatal(latlonErr)
+	}
+	//UnmarshalJSON(GetLatLon(client), &latlonData)
 
-	fmt.Printf("Test for lat lon data: %v\n", latlonData[0])
-
-	//fmt.Printf("Lat for your zip is: %s\n", latlonData.LAT)
-	//fmt.Printf("Lon for your zip is: %s\n", latlonData.LON)
+	fmt.Printf("Lat for your zip is: %s\n", location.LAT)
+	fmt.Printf("Lon for your zip is: %s\n", location.LON)*/
 }
 
-func GetLatLon() []byte {
+func GetLatLon(client *http.Client, htmlData *[]byte) {
 	var zipCode string
 	fmt.Printf("Please enter your zip code: ")
 	fmt.Scanln(&zipCode)
 
-	url := fmt.Sprintf("https://nominatim.openstreetmap.org/search?postalcode=%s&country=United%20States&format=json", zipCode)
-	client := &http.Client{}
+	//url := fmt.Sprintf("https://nominatim.openstreetmap.org/search?postalcode=%s&country=United%20States&format=json", zipCode)
 
-	var htmlData []byte
+	url := "https://api.coingecko.com/api/v3/coins/bitcoin-cash"
+
 	for i := 0; i < 2; i++ {
+		fmt.Printf("At the top of the for loop. %s\n", htmlData)
 		req, reqErr := http.NewRequest("GET", url, nil)
-
 		if reqErr != nil {
 			PrintRetry(i, reqErr)
 			continue
 		}
-
 		req.Header.Set("User-Agent", "gowx")
 
 		httpResp, httpErr := client.Do(req)
-
 		if httpErr != nil {
 			PrintRetry(i, httpErr)
 			continue
@@ -67,18 +70,33 @@ func GetLatLon() []byte {
 		if htmlErr != nil {
 			PrintRetry(i, htmlErr)
 		}
-		fmt.Printf(string(htmlData))
-		return htmlData
+
+		htmlData = htmlData
+		fmt.Println(i)
+		fmt.Scanln()
+		break
 	}
-	return htmlData
+	fmt.Printf("Within the GetLatLon function: %s\n", *htmlData)
 }
 
-func UnmarshalJSON(htmlData []byte, latlonData *[]LatLon) {
-	jsonErr := json.Unmarshal(htmlData, &latlonData)
-	if jsonErr != nil {
-		log.Fatal(jsonErr)
+func (location *LatLon) UnmarshalJSON(htmlData []byte) error {
+	tmp := []interface{}{&location.LAT, &location.LON}
+	wantLen := len(tmp)
+	if jsonErr := json.Unmarshal(htmlData, &tmp); jsonErr != nil {
+		return jsonErr
 	}
+	if g, e := len(tmp), wantLen; g != e {
+		return fmt.Errorf("Wrong number of fields in LatLon: %d != %d.\n", g, e)
+	}
+	return nil
 }
+
+//func UnmarshalJSON(htmlData []byte, latlonData *[]LatLon) {
+//	jsonErr := json.Unmarshal(htmlData, &latlonData)
+//	if jsonErr != nil {
+//		log.Fatal(jsonErr)
+//	}
+//}
 
 func PrintRetry(tries int, err error) {
 	if tries == 0 {
