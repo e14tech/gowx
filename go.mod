@@ -1,3 +1,3 @@
-module elem14/gowx
+module github.com/e14tech/gowx
 
-go 1.23.1
+go 1.27.4
