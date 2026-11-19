@@ -1,109 +1,142 @@
+// Command gowx prints the National Weather Service forecast for a US ZIP code.
 package main
 
 import (
-	"encoding/json"
+	"bufio"
+	"context"
 	"errors"
+	"flag"
 	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
-	"time"
+	"io"
+	"os"
+	"os/signal"
+	"strings"
 )
 
-type LatLon struct {
-	LAT string `json:"lat"`
-	LON string `json:"lon"`
-}
-
 func main() {
-	client := &http.Client{}
-	//var location LatLon
-	var htmlData []byte
-	GetLatLon(client, &htmlData)
-	fmt.Printf("This is htmlData within the main function: %s\n", string(htmlData))
-	/*if latlonErr := json.Unmarshal(htmlData, &location); latlonErr != nil {
-		log.Fatal(latlonErr)
+	zipFlag := flag.String("zip", "", "US ZIP code")
+	hourly := flag.Bool("hourly", false, "print the hourly forecast instead of the daily summary")
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, "Usage: gowx [-hourly] [-zip ZIP] [ZIP]\n\n")
+		fmt.Fprintf(out, "Show the National Weather Service forecast for a US ZIP code.\n")
+		fmt.Fprintf(out, "With no ZIP, gowx asks for one.\n\n")
+		flag.PrintDefaults()
 	}
-	//UnmarshalJSON(GetLatLon(client), &latlonData)
+	flag.Parse()
 
-	fmt.Printf("Lat for your zip is: %s\n", location.LAT)
-	fmt.Printf("Lon for your zip is: %s\n", location.LON)*/
+	if err := run(*zipFlag, flag.Args(), *hourly); err != nil {
+		fmt.Fprintf(os.Stderr, "gowx: %v\n", err)
+		os.Exit(1)
+	}
 }
 
-func GetLatLon(client *http.Client, htmlData *[]byte) {
-	var zipCode string
-	fmt.Printf("Please enter your zip code: ")
-	fmt.Scanln(&zipCode)
-
-	//url := fmt.Sprintf("https://nominatim.openstreetmap.org/search?postalcode=%s&country=United%20States&format=json", zipCode)
-
-	url := "https://api.coingecko.com/api/v3/coins/bitcoin-cash"
-
-	for i := 0; i < 2; i++ {
-		fmt.Printf("At the top of the for loop. %s\n", htmlData)
-		req, reqErr := http.NewRequest("GET", url, nil)
-		if reqErr != nil {
-			PrintRetry(i, reqErr)
-			continue
-		}
-		req.Header.Set("User-Agent", "gowx")
-
-		httpResp, httpErr := client.Do(req)
-		if httpErr != nil {
-			PrintRetry(i, httpErr)
-			continue
-		}
-
-		if httpResp.StatusCode != 200 {
-			log.Println("HTTP error code: ", httpResp.StatusCode)
-			htmlData, htmlErr := ioutil.ReadAll(httpResp.Body)
-			if htmlErr != nil {
-				PrintRetry(i, htmlErr)
-			}
-			htmlErr = errors.New(string(htmlData))
-			PrintRetry(i, htmlErr)
-			continue
-		}
-		defer httpResp.Body.Close()
-
-		htmlData, htmlErr := ioutil.ReadAll(httpResp.Body)
-		if htmlErr != nil {
-			PrintRetry(i, htmlErr)
-		}
-
-		htmlData = htmlData
-		fmt.Println(i)
-		fmt.Scanln()
-		break
+func run(zipFlag string, args []string, hourly bool) error {
+	zip := strings.TrimSpace(zipFlag)
+	if zip != "" && len(args) > 0 {
+		return errors.New("pass the ZIP with -zip or as an argument, not both")
 	}
-	fmt.Printf("Within the GetLatLon function: %s\n", *htmlData)
-}
+	if len(args) > 1 {
+		return errors.New("too many arguments")
+	}
+	if zip == "" && len(args) == 1 {
+		zip = args[0]
+	}
 
-func (location *LatLon) UnmarshalJSON(htmlData []byte) error {
-	tmp := []interface{}{&location.LAT, &location.LON}
-	wantLen := len(tmp)
-	if jsonErr := json.Unmarshal(htmlData, &tmp); jsonErr != nil {
-		return jsonErr
+	var err error
+	if zip == "" {
+		fmt.Fprint(os.Stderr, "Enter a US ZIP code: ")
+		zip, err = readZIP(os.Stdin)
+		if err != nil {
+			return err
+		}
 	}
-	if g, e := len(tmp), wantLen; g != e {
-		return fmt.Errorf("Wrong number of fields in LatLon: %d != %d.\n", g, e)
+	zip, err = normalizeZIP(zip)
+	if err != nil {
+		return err
 	}
+
+	// NotifyContext cancels ctx on Ctrl-C. Requests use ctx, so the
+	// in-flight call stops instead of waiting out the client timeout.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	svc := newService()
+	lat, lon, display, err := svc.geocode(ctx, zip)
+	if err != nil {
+		return err
+	}
+	meta, err := svc.points(ctx, lat, lon)
+	if err != nil {
+		return err
+	}
+	name := meta.name
+	if name == "" {
+		name = display
+	}
+	if name == "" {
+		name = "ZIP " + zip
+	}
+
+	forecastURL := meta.forecast
+	if hourly {
+		if meta.hourly == "" {
+			return fmt.Errorf("points %s,%s: response missing hourly forecast URL", lat, lon)
+		}
+		forecastURL = meta.hourly
+	}
+	periods, err := svc.forecast(ctx, forecastURL)
+	if err != nil {
+		return err
+	}
+	alerts, err := svc.alerts(ctx, lat, lon)
+	if err != nil {
+		return err
+	}
+
+	writeReport(os.Stdout, report{
+		name:    name,
+		lat:     lat,
+		lon:     lon,
+		periods: periods,
+		alerts:  alerts,
+		hourly:  hourly,
+	})
 	return nil
 }
 
-//func UnmarshalJSON(htmlData []byte, latlonData *[]LatLon) {
-//	jsonErr := json.Unmarshal(htmlData, &latlonData)
-//	if jsonErr != nil {
-//		log.Fatal(jsonErr)
-//	}
-//}
-
-func PrintRetry(tries int, err error) {
-	if tries == 0 {
-		log.Println(err)
-		fmt.Printf("Will try again in one minute.\n")
-	} else {
-		log.Fatal("No more tries. ", err)
+// normalizeZIP accepts 50583 and 50583-1234. Nominatim's postalcode
+// query wants the 5-digit code, so a ZIP+4 suffix is dropped.
+func normalizeZIP(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if len(s) == 10 && s[5] == '-' {
+		if !digits(s[:5]) || !digits(s[6:]) {
+			return "", fmt.Errorf("ZIP must be 5 digits (or ZIP+4), got %q", s)
+		}
+		return s[:5], nil
 	}
-	time.Sleep(10 * time.Second)
+	if len(s) != 5 || !digits(s) {
+		return "", fmt.Errorf("ZIP must be 5 digits (or ZIP+4), got %q", s)
+	}
+	return s, nil
+}
+
+func digits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func readZIP(r io.Reader) (string, error) {
+	sc := bufio.NewScanner(r)
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return "", fmt.Errorf("read ZIP: %w", err)
+		}
+		return "", errors.New("no ZIP entered")
+	}
+	return strings.TrimSpace(sc.Text()), nil
 }
